@@ -102,15 +102,15 @@
    (jdbc/with-db-transaction [conn datasource]
      (let [id (str (get value recognize-key))
            session (session-by-id datasource table id)]
-       (if (and session
-                (not= "" id))
+       (if session
          (let [{old-session-id :session_id old-id :id} session]
            (if (= old-session-id key)
              (update-session-value! conn table serialize key value)
              (do
                (remove-session datasource table old-session-id)
                (insert-session-value! conn table serialize id value))))
-         (insert-session-value! conn table serialize id value)))))
+         (if (not= "" id)
+           (insert-session-value! conn table serialize id value))))))
   (delete-session
    [_ key]
    (jdbc/delete! datasource table ["session_id = ?" key])

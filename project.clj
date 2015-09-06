@@ -1,4 +1,4 @@
-(defproject ring-jdbc-single-session "0.0.1"
+(defproject ring-jdbc-single-session "0.0.2"
   :description "用户单一的session"
   :url "https://github.com/zzwu/ring-jdbc-single-session"
   :license {:name "Eclipse Public License"
