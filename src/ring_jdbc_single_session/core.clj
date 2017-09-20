@@ -1,9 +1,11 @@
 (ns ring-jdbc-single-session.core
   (:require [clojure.java.jdbc :as jdbc]
             [taoensso.nippy :as nippy]
+            [clojure.tools.logging :as log]
             [ring.middleware.session.store :refer :all])
   (:import java.util.UUID
-           org.apache.commons.codec.binary.Base64))
+           org.apache.commons.codec.binary.Base64
+           java.sql.SQLException))
 
 (defn serialize-mysql [value]
   (nippy/freeze value))
@@ -92,25 +94,58 @@
       :value (serialize value)})
     key))
 
+(defn fn-with-retry-when-catch-sql-exception
+  [f]
+  (fn [& params]
+    (try
+      (apply f params)
+      ;;SQLException retry
+      (catch SQLException se
+        (do
+          (log/error :catch-a-SQLException (.getMessage se)
+                    :error-code (.getErrorCode se)
+                    :eexcption se)
+          (try
+            ;;retry
+            (apply f params)
+            (catch SQLException se2
+              (do
+                (log/error :retry-catch-a-SQLException (.getMessage se2)
+                          :error-code (.getErrorCode se2)
+                          :eexcption se2)
+                (throw se2))))))
+      ;;别的exception 直接抛出
+      (catch Exception e
+        (throw e)))))
+
+(defn do-write-session-inner
+  [key value recognize-key datasource table serialize deserialize]
+  (jdbc/with-db-transaction [conn datasource]
+    (let [id (str (get value recognize-key))
+          session (session-by-id datasource table id)]
+      (if session
+        (let [{old-session-id :session_id old-id :id} session]
+          (if (= old-session-id key)
+            (update-session-value! conn table serialize key value)
+            (do
+              (remove-session datasource table old-session-id)
+              (insert-session-value! conn table serialize id value))))
+        (if (not= "" id)
+          (insert-session-value! conn table serialize id value))))))
+
+(def do-write-session!
+  (-> do-write-session-inner
+      fn-with-retry-when-catch-sql-exception
+      fn-with-retry-when-catch-sql-exception))
+
 (deftype JdbcStore [recognize-key datasource table serialize deserialize]
   SessionStore
   (read-session
    [_ key]
    (read-session-value datasource table deserialize key))
   (write-session
-   [_ key value]
-   (jdbc/with-db-transaction [conn datasource]
-     (let [id (str (get value recognize-key))
-           session (session-by-id datasource table id)]
-       (if session
-         (let [{old-session-id :session_id old-id :id} session]
-           (if (= old-session-id key)
-             (update-session-value! conn table serialize key value)
-             (do
-               (remove-session datasource table old-session-id)
-               (insert-session-value! conn table serialize id value))))
-         (if (not= "" id)
-           (insert-session-value! conn table serialize id value))))))
+    [_ key value]
+    (do-write-session! key value recognize-key datasource table serialize deserialize))
   (delete-session
    [_ key]
    (jdbc/delete! datasource table ["session_id = ?" key])
