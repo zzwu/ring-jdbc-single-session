@@ -48,25 +48,25 @@
    :h2 deserialize-h2})
 
 (defn detect-db [db]
-  (let [db-name (.. (jdbc/get-connection db) getMetaData getDatabaseProductName toLowerCase)]
-    (cond
-     (.contains db-name "oracle") :oracle
-     (.contains db-name "postgres") :postgres
-     (.contains db-name "mysql") :mysql
-     (.contains db-name "h2") :h2
-     :else (throw (Exception. (str "unrecognized DB: " db-name))))))
+  (with-open [conn (jdbc/get-connection db)]
+    (let [db-name (.. conn getMetaData getDatabaseProductName toLowerCase)]
+      (cond
+        (.contains db-name "oracle") :oracle
+        (.contains db-name "postgres") :postgres
+        (.contains db-name "mysql") :mysql
+        (.contains db-name "h2") :h2
+        :else (throw (Exception. (str "unrecognized DB: " db-name)))))))
 
 (defn read-session-value [datasource table deserialize key]
-  (jdbc/with-db-transaction [conn datasource]
-    (-> (jdbc/query conn [(str "select value from " (name table) " where session_id = ?") key])
-        first
-        :value
-        deserialize)))
+  (-> (jdbc/query datasource
+                  [(str "select value from " (name table) " where session_id = ?") key])
+      first
+      :value
+      deserialize))
 
 (defn session-by-id [datasource table id]
-  (jdbc/with-db-transaction [conn datasource]
-    (-> (jdbc/query conn [(str "select * from " (name table) " where id  = ?") id])
-        first)))
+  (-> (jdbc/query datasource [(str "select * from " (name table) " where id  = ?") id])
+      first))
 
 (defn remove-session
   [datasource table key]
@@ -120,22 +120,21 @@
 
 (defn do-write-session-inner
   [key value recognize-key datasource table serialize deserialize]
-  (jdbc/with-db-transaction [conn datasource]
-    (let [id (str (get value recognize-key))
-          session (session-by-id datasource table id)]
-      (if session
-        (let [{old-session-id :session_id old-id :id} session]
-          (if (= old-session-id key)
-            (update-session-value! conn table serialize key value)
-            (do
-              (remove-session datasource table old-session-id)
-              (insert-session-value! conn table serialize id value))))
-        (if (not= "" id)
-          (insert-session-value! conn table serialize id value))))))
+  (let [id (str (get value recognize-key))
+        session (session-by-id datasource table id)]
+    (if session
+      (let [{old-session-id :session_id old-id :id} session]
+        (if (= old-session-id key)
+          (update-session-value! datasource table serialize key value)
+          (do
+            (remove-session datasource table old-session-id)
+            (insert-session-value! datasource table serialize id value))))
+      (if (not= "" id)
+        (insert-session-value! datasource table serialize id value)))))
 
 (def do-write-session!
   (-> do-write-session-inner
-      fn-with-retry-when-catch-sql-exception
+      ;;retry once
       fn-with-retry-when-catch-sql-exception))
 
 (deftype JdbcStore [recognize-key datasource table serialize deserialize]
